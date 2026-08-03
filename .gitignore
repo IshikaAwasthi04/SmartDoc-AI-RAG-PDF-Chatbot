@@ -1,0 +1,24 @@
+# Virtual Environment
+venv/
+
+# Environment Variables
+.env
+
+# Python Cache
+__pycache__/
+*.pyc
+
+# Vector Database
+vectorstore/
+
+# Uploaded PDFs
+uploads/
+
+# Test Files (Optional)
+test_*.py
+
+# VS Code
+.vscode/
+
+# macOS
+.DS_Store
