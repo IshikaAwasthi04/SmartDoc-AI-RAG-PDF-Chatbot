@@ -1,0 +1,97 @@
+
+"""Schema-aware merchant analytics with deterministic Pandas execution.
+
+The router infers metrics, grouping columns, filters, and rankings from the
+question and the uploaded dataframe. It does not execute LLM-generated code.
+"""
+import json
+import re
+import pandas as pd
+
+
+def _normalise(value):
+    return re.sub(r"\s+", " ", str(value).replace("_", " ").strip().lower())
+
+
+def _column_map(df):
+    return {_normalise(c): c for c in df.columns}
+
+
+def _resolve_column(df, phrase):
+    phrase = _normalise(phrase)
+    cmap = _column_map(df)
+    if phrase in cmap:
+        return cmap[phrase]
+    aliases = {
+        "merchant": ["merchant name", "business", "store"],
+        "merchant name": ["merchant"],
+        "payment method": ["payment type", "mode of payment"],
+        "country": ["region"],
+        "amount": ["transaction amount", "transaction value", "sales", "revenue", "value"],
+        "status": ["transaction status", "payment status"],
+        "currency": ["currencies"],
+        "transaction id": ["transaction ids", "id", "records"],
+        "category": ["product category"],
+    }
+    for canonical, variants in aliases.items():
+        if phrase == canonical or phrase in variants:
+            for candidate in [canonical, *variants]:
+                if candidate in cmap:
+                    return cmap[candidate]
+    return None
+
+
+def _mentioned_column(df, text):
+    """Find an actual dataframe column mentioned in a natural-language question."""
+    q = _normalise(text)
+    columns = sorted(df.columns, key=lambda c: len(_normalise(c)), reverse=True)
+    for column in columns:
+        name = _normalise(column)
+        if name and re.search(r"(?<!\w)" + re.escape(name) + r"(?!\w)", q):
+            return column
+    # Resolve common business language against columns that actually exist.
+    for alias in (
+        "merchant", "payment method", "country", "amount", "status",
+        "currency", "category", "transaction id",
+    ):
+        if re.search(r"(?<!\w)" + re.escape(alias) + r"(?!\w)", q):
+            resolved = _resolve_column(df, alias)
+            if resolved is not None:
+                return resolved
+    return None
+
+
+def _flag_mask(series, label):
+    numeric = pd.to_numeric(series, errors="coerce")
+    text = series.astype("string").str.strip().str.casefold()
+    truthy = numeric.eq(1) | text.isin(["true", "yes", "y", "1", label, label + "ed"])
+    if label == "refund":
+        truthy = truthy | text.isin(["refunded", "refund"])
+    return truthy.fillna(False)
+
+
+def _status_mask(df, status_col, target):
+    return df[status_col].astype("string").str.strip().str.casefold().eq(target.casefold()).fillna(False)
+
+
+def _safe_records(df, limit=30):
+    return df.head(limit).astype(object).where(pd.notna(df.head(limit)), None).to_dict("records")
+
+
+def _out(operation, result, explanation=""):
+    return {"supported": True, "operation": operation, "result": result, "explanation": explanation}
+
+
+def _unsupported(message=None):
+    return {
+        "supported": False,
+        "operation": "unsupported_question",
+        "result": message or (
+            "I couldn't map the question to a safe analysis. Try requesting a count, "
+            "sum, average, rate, ranking, or breakdown using columns in the uploaded data."
+        ),
+    }
+
+
+def analyze_merchant_question(dataframe, question):
+    """Parse a question into a supported analytical operation and calculate it."""
